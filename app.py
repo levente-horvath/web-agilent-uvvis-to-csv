@@ -1,4 +1,28 @@
 """
+A web application to convert Agilent 845x Chemstation UV-vis files to .csv format.
+Supports .KD and .SD file types.
+
+Version 0.1.11
+Created by David Hebert, Webapp adaptation by Grok
+"""
+
+from flask import Flask, request, send_file, render_template_string, Response
+from werkzeug.utils import secure_filename
+import os
+from struct import iter_unpack
+from pathlib import Path
+import pandas as pd
+import zipfile
+import io
+
+app = Flask(__name__)
+
+# Original script code (UVvisFile class and supporting functions remain largely unchanged)
+# [Insert the UVvisFile class and supporting functions from the original script here]
+# I'll only show the modified/new parts for brevity
+
+
+"""
 A simple script to convert Agilent 845x Chemstation UV-vis files to .csv format.
 
 To use this script, simply run it from the command line then provide a file
@@ -8,11 +32,6 @@ Version 0.1.10
 Created by David Hebert
 
 """
-
-from struct import iter_unpack
-from pathlib import Path
-import pandas as pd
-
 
 SUPPORTED_FILE_TYPES = ['.KD', '.SD']
 ENCODINGS = [
@@ -408,6 +427,141 @@ def input_path() -> str:
         return ''
 
 
+
+
+
+
+
+SUPPORTED_FILE_TYPES = ['.KD', '.SD']
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'kd', 'sd'}
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# HTML template as a string
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UV-vis File Converter</title>
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .container { max-width: 800px; margin: auto; }
+        .error { color: red; }
+        .success { color: green; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="jumbotron text-center">
+            <h1 class="display-4">UV-vis File Converter</h1>
+            <p class="lead">Convert Agilent 845x Chemstation UV-vis files (.KD or .SD) to CSV format</p>
+        </div>
+        
+        <form method="post" enctype="multipart/form-data" class="mb-4">
+            <div class="form-group">
+                <label for="file">Choose a file</label>
+                <input type="file" class="form-control-file" id="file" name="file" accept=".kd,.sd">
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Convert</button>
+        </form>
+        
+        {% if error %}
+            <div class="alert alert-danger" role="alert">
+                {{ error }}
+            </div>
+        {% endif %}
+        {% if success %}
+            <div class="alert alert-success" role="alert">
+                {{ success }}
+            </div>
+        {% endif %}
+    </div>
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.4/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+</body>
+</html>
+"""
+
+@app.route('/', methods=['GET', 'POST'])
+def upload_file():
+    if not os.path.exists(UPLOAD_FOLDER):
+        os.makedirs(UPLOAD_FOLDER)
+
+    if request.method == 'POST':
+        # Check if a file was uploaded
+        if 'file' not in request.files:
+            return render_template_string(HTML_TEMPLATE, error='No file uploaded')
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return render_template_string(HTML_TEMPLATE, error='No file selected')
+        
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            
+            try:
+                # Process the file
+                uvvis = UVvisFile(filepath)
+                
+                # If single spectrum, return single CSV
+                if len(uvvis.spectra) == 1:
+                    output_filename = f"{Path(filename).stem}"
+                    if uvvis.samplenames[0]:
+                        output_filename += f" - {uvvis.samplenames[0]}"
+                    output_filename += ".csv"
+                    
+                    uvvis.spectra[0].to_csv(filepath, index=False)
+                    return send_file(
+                        filepath,
+                        as_attachment=True,
+                        download_name=output_filename
+                    )
+                
+                # If multiple spectra, create zip file
+                else:
+                    memory_file = io.BytesIO()
+                    with zipfile.ZipFile(memory_file, 'w') as zf:
+                        digits_prefix = len(str(len(uvvis.spectra)))
+                        for i, (spectrum, samplename) in enumerate(zip(uvvis.spectra, uvvis.samplenames), start=1):
+                            filename = f'{str(i).zfill(digits_prefix)}'
+                            if samplename:
+                                filename += f' - {samplename}'
+                            filename += '.csv'
+                            
+                            # Create temporary CSV in memory
+                            csv_buffer = io.StringIO()
+                            spectrum.to_csv(csv_buffer, index=False)
+                            zf.writestr(filename, csv_buffer.getvalue())
+                    
+                    memory_file.seek(0)
+                    return Response(
+                        memory_file.getvalue(),
+                        mimetype='application/zip',
+                        headers={
+                            'Content-Disposition': f'attachment;filename={Path(filename).stem}_converted.zip'
+                        }
+                    )
+                    
+            except Exception as e:
+                return render_template_string(HTML_TEMPLATE, error=f'Error processing file: {str(e)}')
+            finally:
+                # Clean up uploaded file
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    
+        return render_template_string(HTML_TEMPLATE, error='Invalid file type. Please upload .KD or .SD file')
+    
+    return render_template_string(HTML_TEMPLATE)
+
 if __name__ == '__main__':
-    if path := input_path():
-        UVvisFile(path, export_csv=True)
+    app.run(debug=True)
